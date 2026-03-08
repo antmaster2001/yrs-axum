@@ -1,3 +1,5 @@
+use axum::extract::ws::{Message, WebSocket};
+use axum::Error;
 use bytes::Bytes;
 use futures_util::stream::SplitSink;
 use futures_util::{SinkExt, StreamExt};
@@ -9,8 +11,6 @@ use std::time::Duration;
 use tokio::select;
 use tokio::sync::{Mutex, RwLock};
 use tokio::time::interval;
-use axum::Error;
-use axum::extract::ws::{Message, WebSocket};
 
 const PING_TIMEOUT: Duration = Duration::from_secs(30);
 
@@ -35,9 +35,9 @@ const PING_TIMEOUT: Duration = Duration::from_secs(30);
 /// async fn main() {
 ///     let addr = SocketAddr::from_str("0.0.0.0:8000").unwrap();
 ///     let listener = tokio::net::TcpListener::bind(addr).await.unwrap();
-///     
+///
 ///     let signaling = SignalingService::new();
-///     
+///
 ///     let app = Router::new()
 ///         .route("/signaling", get(ws_handler))
 ///         .with_state(signaling);
@@ -223,8 +223,8 @@ pub async fn signaling_conn(ws: WebSocket, service: SignalingService) -> Result<
     }
 }
 
-const PING_MSG: &'static str = r#"{"type":"ping"}"#;
-const PONG_MSG: &'static str = r#"{"type":"pong"}"#;
+const PING_MSG: &str = r#"{"type":"ping"}"#;
+const PONG_MSG: &str = r#"{"type":"pong"}"#;
 
 async fn process_msg(
     msg: Message,
@@ -306,7 +306,7 @@ async fn process_msg(
                     ws.try_send(Message::text(PING_MSG)).await?;
                 }
             }
-        },
+        }
         Message::Close(_close_frame) => {
             let mut topics = topics.write().await;
             for topic in state.subscribed_topics.drain() {
@@ -318,12 +318,11 @@ async fn process_msg(
                 }
             }
             state.closed = true;
-        },
+        }
         Message::Ping(_bytes) => {
             ws.try_send(Message::Ping(Bytes::default())).await?;
-        }, 
+        }
         _ => {}
-
     }
     Ok(())
 }
