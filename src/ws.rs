@@ -1,10 +1,10 @@
 use crate::conn::Connection;
 use crate::AwarenessRef;
+use axum::extract::ws::{Message, WebSocket};
 use futures_util::stream::{SplitSink, SplitStream};
 use futures_util::{Stream, StreamExt};
 use std::pin::Pin;
 use std::task::{Context, Poll};
-use axum::extract::ws::{WebSocket, Message};
 use yrs::sync::Error;
 
 /// Connection Wrapper over a [WebSocket], which implements a Yjs/Yrs awareness and update exchange
@@ -245,6 +245,13 @@ mod test {
     use crate::broadcast::BroadcastGroup;
     use crate::conn::Connection;
     use crate::ws::{AxumSink, AxumStream};
+    use axum::{
+        extract::ws::{WebSocket, WebSocketUpgrade},
+        extract::State,
+        response::IntoResponse,
+        routing::get,
+        Router,
+    };
     use futures_util::stream::{SplitSink, SplitStream};
     use futures_util::{ready, SinkExt, Stream, StreamExt};
     use std::pin::Pin;
@@ -252,19 +259,12 @@ mod test {
     use std::task::{Context, Poll};
     use std::time::Duration;
     use tokio::net::TcpStream;
-    use tokio::sync::{Mutex, Notify, RwLock};
+    use tokio::sync::{Mutex, Notify};
     use tokio::task;
     use tokio::task::JoinHandle;
     use tokio::time::{sleep, timeout};
     use tokio_tungstenite::tungstenite::Message;
     use tokio_tungstenite::{MaybeTlsStream, WebSocketStream};
-    use axum::{
-        Router,
-        routing::get,
-        extract::ws::{WebSocket, WebSocketUpgrade},
-        extract::State,
-        response::IntoResponse,
-    };
     use yrs::sync::{Awareness, Error};
     use yrs::updates::encoder::Encode;
     use yrs::{Doc, GetString, Subscription, Text, Transact};
@@ -274,7 +274,7 @@ mod test {
         bcast: Arc<BroadcastGroup>,
     ) -> Result<JoinHandle<()>, Box<dyn std::error::Error>> {
         let listener = tokio::net::TcpListener::bind(addr).await.unwrap();
-        
+
         let app = Router::new()
             .route("/my-room", get(ws_handler))
             .with_state(bcast);
@@ -364,7 +364,7 @@ mod test {
             let result = ready!(stream.poll_next(cx));
             match result {
                 None => Poll::Ready(None),
-                Some(Ok(msg)) => Poll::Ready(Some(Ok(msg.into_data()))),
+                Some(Ok(msg)) => Poll::Ready(Some(Ok(msg.into_data().into()))),
                 Some(Err(e)) => Poll::Ready(Some(Err(Error::Other(Box::new(e))))),
             }
         }
@@ -378,11 +378,7 @@ mod test {
         let (sink, stream) = stream.split();
         let sink = TungsteniteSink(sink);
         let stream = TungsteniteStream(stream);
-        Ok(Connection::new(
-            Arc::new(RwLock::new(Awareness::new(doc))),
-            sink,
-            stream,
-        ))
+        Ok(Connection::new(Arc::new(Awareness::new(doc)), sink, stream))
     }
 
     fn create_notifier(doc: &Doc) -> (Arc<Notify>, Subscription) {
@@ -401,23 +397,23 @@ mod test {
     async fn change_introduced_by_server_reaches_subscribed_clients() {
         let doc = Doc::with_client_id(1);
         let text = doc.get_or_insert_text("test");
-        let awareness = Arc::new(RwLock::new(Awareness::new(doc)));
+        let awareness = Arc::new(Awareness::new(doc));
         let bcast = BroadcastGroup::new(awareness.clone(), 10).await;
-        let _server = start_server("0.0.0.0:16600", Arc::new(bcast)).await.unwrap();
+        let _server = start_server("0.0.0.0:16600", Arc::new(bcast))
+            .await
+            .unwrap();
 
         let doc = Doc::new();
         let (n, _sub) = create_notifier(&doc);
         let c1 = client("ws://localhost:16600/my-room", doc).await.unwrap();
 
         {
-            let lock = awareness.write().await;
-            text.push(&mut lock.doc().transact_mut(), "abc");
+            text.push(&mut awareness.doc().transact_mut(), "abc");
         }
 
         timeout(TIMEOUT, n.notified()).await.unwrap();
 
         {
-            let awareness = c1.awareness().read().await;
             let doc = awareness.doc();
             let text = doc.get_or_insert_text("test");
             let str = text.get_string(&doc.transact());
@@ -432,9 +428,11 @@ mod test {
 
         text.push(&mut doc.transact_mut(), "abc");
 
-        let awareness = Arc::new(RwLock::new(Awareness::new(doc)));
+        let awareness = Arc::new(Awareness::new(doc));
         let bcast = BroadcastGroup::new(awareness.clone(), 10).await;
-        let _server = start_server("0.0.0.0:16601", Arc::new(bcast)).await.unwrap();
+        let _server = start_server("0.0.0.0:16601", Arc::new(bcast))
+            .await
+            .unwrap();
 
         let doc = Doc::new();
         let (n, _sub) = create_notifier(&doc);
@@ -443,7 +441,7 @@ mod test {
         timeout(TIMEOUT, n.notified()).await.unwrap();
 
         {
-            let awareness = c1.awareness().read().await;
+            let awareness = c1.awareness();
             let doc = awareness.doc();
             let text = doc.get_or_insert_text("test");
             let str = text.get_string(&doc.transact());
@@ -456,16 +454,18 @@ mod test {
         let doc = Doc::with_client_id(1);
         let _ = doc.get_or_insert_text("test");
 
-        let awareness = Arc::new(RwLock::new(Awareness::new(doc)));
+        let awareness = Arc::new(Awareness::new(doc));
         let bcast = BroadcastGroup::new(awareness.clone(), 10).await;
-        let _server = start_server("0.0.0.0:16602", Arc::new(bcast)).await.unwrap();
+        let _server = start_server("0.0.0.0:16602", Arc::new(bcast))
+            .await
+            .unwrap();
 
         let d1 = Doc::with_client_id(2);
         let c1 = client("ws://localhost:16602/my-room", d1).await.unwrap();
         // by default changes made by document on the client side are not propagated automatically
         let _sub11 = {
             let sink = c1.sink();
-            let a = c1.awareness().write().await;
+            let a = c1.awareness();
             let doc = a.doc();
             doc.observe_update_v1(move |_, e| {
                 let update = e.update.to_owned();
@@ -486,7 +486,7 @@ mod test {
         let c2 = client("ws://localhost:16602/my-room", d2).await.unwrap();
 
         {
-            let a = c1.awareness().write().await;
+            let a = c1.awareness();
             let doc = a.doc();
             let text = doc.get_or_insert_text("test");
             text.push(&mut doc.transact_mut(), "def");
@@ -495,7 +495,7 @@ mod test {
         timeout(TIMEOUT, n2.notified()).await.unwrap();
 
         {
-            let awareness = c2.awareness().read().await;
+            let awareness = c2.awareness();
             let doc = awareness.doc();
             let text = doc.get_or_insert_text("test");
             let str = text.get_string(&doc.transact());
@@ -508,16 +508,18 @@ mod test {
         let doc = Doc::with_client_id(1);
         let _text = doc.get_or_insert_text("test");
 
-        let awareness = Arc::new(RwLock::new(Awareness::new(doc)));
+        let awareness = Arc::new(Awareness::new(doc));
         let bcast = BroadcastGroup::new(awareness.clone(), 10).await;
-        let _server = start_server("0.0.0.0:16603", Arc::new(bcast)).await.unwrap();
+        let _server = start_server("0.0.0.0:16603", Arc::new(bcast))
+            .await
+            .unwrap();
 
         let d1 = Doc::with_client_id(2);
         let c1 = client("ws://localhost:16603/my-room", d1).await.unwrap();
         // by default changes made by document on the client side are not propagated automatically
         let _sub11 = {
             let sink = c1.sink();
-            let a = c1.awareness().write().await;
+            let a = c1.awareness();
             let doc = a.doc();
             doc.observe_update_v1(move |_, e| {
                 let update = e.update.to_owned();
@@ -542,7 +544,7 @@ mod test {
         let c3 = client("ws://localhost:16603/my-room", d3).await.unwrap();
 
         {
-            let a = c1.awareness().write().await;
+            let a = c1.awareness();
             let doc = a.doc();
             let text = doc.get_or_insert_text("test");
             text.push(&mut doc.transact_mut(), "abc");
@@ -554,14 +556,14 @@ mod test {
         sleep(TIMEOUT).await;
 
         {
-            let awareness = c2.awareness().read().await;
+            let awareness = c2.awareness();
             let doc = awareness.doc();
             let text = doc.get_or_insert_text("test");
             let str = text.get_string(&doc.transact());
             assert_eq!(str, "abc".to_string());
         }
         {
-            let awareness = c3.awareness().read().await;
+            let awareness = c3.awareness();
             let doc = awareness.doc();
             let text = doc.get_or_insert_text("test");
             let str = text.get_string(&doc.transact());
@@ -577,13 +579,13 @@ mod test {
         drop(sub2);
 
         let (n2, _sub2) = {
-            let a = c2.awareness().write().await;
+            let a = c2.awareness();
             let doc = a.doc();
             create_notifier(doc)
         };
 
         {
-            let a = c1.awareness().write().await;
+            let a = c1.awareness();
             let doc = a.doc();
             let text = doc.get_or_insert_text("test");
             text.push(&mut doc.transact_mut(), "def");
@@ -592,7 +594,7 @@ mod test {
         timeout(TIMEOUT, n2.notified()).await.unwrap();
 
         {
-            let awareness = c2.awareness().read().await;
+            let awareness = c2.awareness();
             let doc = awareness.doc();
             let text = doc.get_or_insert_text("test");
             let str = text.get_string(&doc.transact());

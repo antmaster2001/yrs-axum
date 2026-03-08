@@ -1,11 +1,15 @@
+use axum::{
+    extract::{
+        ws::{WebSocket, WebSocketUpgrade},
+        State,
+    },
+    response::IntoResponse,
+    routing::get,
+    Router,
+};
 use futures_util::StreamExt;
 use std::sync::Arc;
-use tokio::sync::{Mutex, RwLock};
-use axum::{
-    extract::{ws::{WebSocket, WebSocketUpgrade}, State}, 
-    response::IntoResponse, 
-    routing::get, Router
-};
+use tokio::sync::Mutex;
 use tower_http::services::ServeDir;
 use yrs::sync::Awareness;
 use yrs::{Doc, Text, Transact};
@@ -31,7 +35,7 @@ async fn main() {
 }"#,
             );
         }
-        Arc::new(RwLock::new(Awareness::new(doc)))
+        Arc::new(Awareness::new(doc))
     };
 
     // open a broadcast group that listens to awareness and document updates
@@ -47,7 +51,7 @@ async fn main() {
     // Start the server
     let listener = tokio::net::TcpListener::bind("0.0.0.0:8000").await.unwrap();
     println!("Listening on {}", &listener.local_addr().unwrap());
-    
+
     axum::serve(listener, app.into_make_service())
         .await
         .unwrap();
